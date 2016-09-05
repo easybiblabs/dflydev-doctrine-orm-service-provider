@@ -13,17 +13,27 @@ namespace Dflydev\Pimple\Provider\DoctrineOrm;
 
 use Doctrine\Common\Cache\ApcCache;
 use Doctrine\Common\Cache\ArrayCache;
+use Doctrine\Common\Cache\CacheProvider;
+use Doctrine\Common\Cache\FilesystemCache;
 use Doctrine\Common\Cache\MemcacheCache;
 use Doctrine\Common\Cache\MemcachedCache;
 use Doctrine\Common\Cache\XcacheCache;
+use Doctrine\Common\Cache\RedisCache;
 use Doctrine\Common\Persistence\Mapping\Driver\MappingDriver;
 use Doctrine\Common\Persistence\Mapping\Driver\MappingDriverChain;
+use Doctrine\DBAL\Types\Type;
 use Doctrine\ORM\Configuration;
 use Doctrine\ORM\EntityManager;
+use Doctrine\ORM\Mapping\DefaultEntityListenerResolver;
+use Doctrine\ORM\Mapping\DefaultNamingStrategy;
+use Doctrine\ORM\Mapping\DefaultQuoteStrategy;
 use Doctrine\ORM\Mapping\Driver\Driver;
+use Doctrine\ORM\Mapping\Driver\SimplifiedXmlDriver;
+use Doctrine\ORM\Mapping\Driver\SimplifiedYamlDriver;
 use Doctrine\ORM\Mapping\Driver\XmlDriver;
 use Doctrine\ORM\Mapping\Driver\YamlDriver;
 use Doctrine\ORM\Mapping\Driver\StaticPHPDriver;
+use Doctrine\ORM\Repository\DefaultRepositoryFactory;
 
 /**
  * Doctrine ORM Pimple Service Provider.
@@ -34,7 +44,7 @@ class DoctrineOrmServiceProvider
 {
     public function register(\Pimple $app)
     {
-        foreach ($this->getOrmDefaults($app) as $key => $value) {
+        foreach ($this->getOrmDefaults() as $key => $value) {
             if (!isset($app[$key])) {
                 $app[$key] = $value;
             }
@@ -43,6 +53,7 @@ class DoctrineOrmServiceProvider
         $app['orm.em.default_options'] = array(
             'connection' => 'default',
             'mappings' => array(),
+            'types' => array()
         );
 
         $app['orm.ems.options.initializer'] = $app->protect(function () use ($app) {
@@ -116,6 +127,20 @@ class DoctrineOrmServiceProvider
                 $config->setProxyNamespace($app['orm.proxies_namespace']);
                 $config->setAutoGenerateProxyClasses($app['orm.auto_generate_proxies']);
 
+                $config->setCustomStringFunctions($app['orm.custom.functions.string']); 
+                $config->setCustomNumericFunctions($app['orm.custom.functions.numeric']); 
+                $config->setCustomDatetimeFunctions($app['orm.custom.functions.datetime']); 
+                $config->setCustomHydrationModes($app['orm.custom.hydration_modes']);
+
+                $config->setClassMetadataFactoryName($app['orm.class_metadata_factory_name']);
+                $config->setDefaultRepositoryClassName($app['orm.default_repository_class']);
+
+                $config->setEntityListenerResolver($app['orm.entity_listener_resolver']);
+                $config->setRepositoryFactory($app['orm.repository_factory']);
+
+                $config->setNamingStrategy($app['orm.strategy.naming']);
+                $config->setQuoteStrategy($app['orm.strategy.quote']);
+
                 $chain = $app['orm.mapping_driver_chain.locator']($name);
                 foreach ((array) $options['mappings'] as $entity) {
                     if (!is_array($entity)) {
@@ -126,6 +151,10 @@ class DoctrineOrmServiceProvider
 
                     if (!empty($entity['resources_namespace'])) {
                         $entity['path'] = $app['psr0_resource_locator']->findFirstDirectory($entity['resources_namespace']);
+                    }
+
+                    if (isset($entity['alias'])) {
+                        $config->addEntityNamespace($entity['alias'], $entity['namespace']);
                     }
 
                     switch ($entity['type']) {
@@ -141,8 +170,16 @@ class DoctrineOrmServiceProvider
                             $driver = new YamlDriver($entity['path']);
                             $chain->addDriver($driver, $entity['namespace']);
                             break;
+                        case 'simple_yml':
+                            $driver = new SimplifiedYamlDriver(array($entity['path'] => $entity['namespace']));
+                            $chain->addDriver($driver, $entity['namespace']);
+                            break;
                         case 'xml':
                             $driver = new XmlDriver($entity['path']);
+                            $chain->addDriver($driver, $entity['namespace']);
+                            break;
+                        case 'simple_xml':
+                            $driver = new SimplifiedXmlDriver(array($entity['path'] => $entity['namespace']));
                             $chain->addDriver($driver, $entity['namespace']);
                             break;
                         case 'php':
@@ -156,6 +193,14 @@ class DoctrineOrmServiceProvider
                 }
                 $config->setMetadataDriverImpl($chain);
 
+                foreach ((array) $options['types'] as $typeName => $typeClass) {
+                    if (Type::hasType($typeName)) {
+                        Type::overrideType($typeName, $typeClass);
+                    } else {
+                        Type::addType($typeName, $typeClass);
+                    }
+                }
+
                 $configs[$name] = $config;
             }
 
@@ -166,6 +211,7 @@ class DoctrineOrmServiceProvider
             $config->setMetadataCacheImpl($app['orm.cache.locator']($name, 'metadata', $options));
             $config->setQueryCacheImpl($app['orm.cache.locator']($name, 'query', $options));
             $config->setResultCacheImpl($app['orm.cache.locator']($name, 'result', $options));
+            $config->setHydrationCacheImpl($app['orm.cache.locator']($name, 'hydration', $options));
         });
 
         $app['orm.cache.locator'] = $app->protect(function($name, $cacheName, $options) use ($app) {
@@ -192,7 +238,13 @@ class DoctrineOrmServiceProvider
                 return $app[$cacheInstanceKey];
             }
 
-            return $app[$cacheInstanceKey] = $app['orm.cache.factory']($driver, $options);
+            $cache = $app['orm.cache.factory']($driver, $options[$cacheNameKey]);
+
+            if(isset($options['cache_namespace']) && $cache instanceof CacheProvider) {
+                $cache->setNamespace($options['cache_namespace']);
+            }
+
+            return $app[$cacheInstanceKey] = $cache;
         });
 
         if (false === isset($app['orm.cache.factory.backing_memcache'])) {
@@ -242,6 +294,28 @@ class DoctrineOrmServiceProvider
             return $cache;
         });
 
+        $app['orm.cache.factory.backing_redis'] = $app->protect(function() {
+            return new \Redis;
+        });
+
+        $app['orm.cache.factory.redis'] = $app->protect(function($cacheOptions) use ($app) {
+            if (empty($cacheOptions['host']) || empty($cacheOptions['port'])) {
+                throw new \RuntimeException('Host and port options need to be specified for redis cache');
+            }
+
+            $redis = $app['orm.cache.factory.backing_redis']();
+            $redis->connect($cacheOptions['host'], $cacheOptions['port']);
+
+            if (isset($cacheOptions['password'])) {
+                $redis->auth($cacheOptions['password']);
+            }
+
+            $cache = new RedisCache;
+            $cache->setRedis($redis);
+
+            return $cache;
+        });
+
         $app['orm.cache.factory.array'] = $app->protect(function() {
             return new ArrayCache;
         });
@@ -252,6 +326,18 @@ class DoctrineOrmServiceProvider
 
         $app['orm.cache.factory.xcache'] = $app->protect(function() {
             return new XcacheCache;
+        });
+
+        $app['orm.cache.factory.filesystem'] = $app->protect(function($cacheOptions) {
+            if (empty($cacheOptions['path'])) {
+                throw new \RuntimeException('FilesystemCache path not defined');
+            }
+
+            $cacheOptions += array(
+                'extension' => FilesystemCache::EXTENSION,
+                'umask' => 0002,
+            );
+            return new FilesystemCache($cacheOptions['path'], $cacheOptions['extension'], $cacheOptions['umask']);
         });
 
         $app['orm.cache.factory'] = $app->protect(function($driver, $cacheOptions) use ($app) {
@@ -266,6 +352,10 @@ class DoctrineOrmServiceProvider
                     return $app['orm.cache.factory.memcache']($cacheOptions);
                 case 'memcached':
                     return $app['orm.cache.factory.memcached']($cacheOptions);
+                case 'filesystem':
+                    return $app['orm.cache.factory.filesystem']($cacheOptions);
+                case 'redis':
+                    return $app['orm.cache.factory.redis']($cacheOptions);
                 default:
                     throw new \RuntimeException("Unsupported cache type '$driver' specified");
             }
@@ -314,6 +404,22 @@ class DoctrineOrmServiceProvider
             return $mapping;
         });
 
+        $app['orm.strategy.naming'] = $app->share(function($app) {
+            return new DefaultNamingStrategy;
+        });
+
+        $app['orm.strategy.quote'] = $app->share(function($app) {
+            return new DefaultQuoteStrategy;
+        });
+
+        $app['orm.entity_listener_resolver'] = $app->share(function($app) {
+            return new DefaultEntityListenerResolver;
+        });
+
+        $app['orm.repository_factory'] = $app->share(function($app) {
+            return new DefaultRepositoryFactory;
+        });
+
         $app['orm.em'] = $app->share(function($app) {
             $ems = $app['orm.ems'];
 
@@ -334,13 +440,19 @@ class DoctrineOrmServiceProvider
      *
      * @return array
      */
-    protected function getOrmDefaults(\Pimple $app)
+    protected function getOrmDefaults()
     {
         return array(
             'orm.proxies_dir' => __DIR__.'/../../../../../../../../cache/doctrine/proxies',
             'orm.proxies_namespace' => 'DoctrineProxy',
             'orm.auto_generate_proxies' => true,
             'orm.default_cache' => 'array',
+            'orm.custom.functions.string' => array(),
+            'orm.custom.functions.numeric' => array(),
+            'orm.custom.functions.datetime' => array(),
+            'orm.custom.hydration_modes' => array(),
+            'orm.class_metadata_factory_name' => 'Doctrine\ORM\Mapping\ClassMetadataFactory',
+            'orm.default_repository_class' => 'Doctrine\ORM\EntityRepository',
         );
     }
 }

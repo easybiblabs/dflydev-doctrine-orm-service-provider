@@ -145,6 +145,15 @@ $app->register(new DoctrineOrmServiceProvider, array(
                 "namespace" => "Bat\Entities",
                 "path" => __DIR__."/src/Bat/Resources/mappings",
             ),
+            // As of 1.1, you can also use the simplified
+            // XML/YAML driver (Symfony2 style)
+            // Mapping files can be named like Foo.orm.yml
+            // instead of Baz.Entities.Foo.dcm.yml
+            array(
+                "type" => "simple_yml",
+                "namespace" => "Baz\Entities",
+                "path" => __DIR__."/src/Bat/Resources/config/doctrine",
+            ),
             // Using PSR-0 namespaceish embedded resources
             // (requires registering a PSR-0 Resource Locator
             // Service Provider)
@@ -201,8 +210,10 @@ Configuration
 
      Each mapping definition should be an array with the following
      options:
-     * **type**: Mapping driver type, one of `annotation`, `xml`, `yml` or `php`.
+     * **type**: Mapping driver type, one of `annotation`, `xml`, `yml`, `simple_xml`, `simple_yml` or `php`.
      * **namespace**: Namespace in which the entities reside.
+
+     *New: the `simple_xml` and `simple_yml` driver types were added in v1.1 and provide support for the [simplified XML driver][10] and [simplified YAML driver][11] of Doctrine.*
 
      Additionally, each mapping definition should contain one of the
      following options:
@@ -211,6 +222,9 @@ Configuration
        of paths
      * **resources_namespace**: A namespaceish path to where the mapping
        files are located. Example: `Path\To\Foo\Resources\mappings`
+
+     Each mapping definition can have the following optional options:
+     * **alias** (Default: null): Set the alias for the entity namespace.
 
      Each **annotation** mapping may also specify the following options:
      * **use_simple_annotation_reader** (Default: true):
@@ -227,6 +241,10 @@ Configuration
      String or array describing metadata cache implementation.
    * **result_cache** (Default: setting specified by orm.default_cache):
      String or array describing result cache implementation.
+   * **hydration_cache** (Default: setting specified by orm.default_cache):
+     String or array describing hydration cache implementation.
+   * **types**
+     An array of custom types in the format of 'typeName' => 'Namespace\To\Type\Class'
  * **orm.ems.options**:
    Array of Entity Manager configuration sets indexed by each Entity Manager's
    name. Each value should look like **orm.em.options**.
@@ -263,6 +281,13 @@ Configuration
    String defining namespace in which Doctrine generated proxies should reside.
  * **orm.auto_generate_proxies**:
    Boolean defining whether or not proxies should be generated automatically.
+ * **orm.class_metadata_factory_name**: Class name of class metadata factory.
+   Class implements `Doctrine\Common\Persistence\Mapping\ClassMetadataFactory`.
+ * **orm.default_repository_class**: Class name of default repository.
+   Class implements `Doctrine\Common\Persistence\ObjectRepository`.
+ * **orm.repository_factory**: Repository factory, instance `Doctrine\ORM\Repository\RepositoryFactory`.
+ * **orm.entity_listener_resolver**: Entity listener resolver, instance
+   `Doctrine\ORM\Mapping\EntityListenerResolver`.
  * **orm.default_cache**:
    String or array describing default cache implementation.
  * **orm.add_mapping_driver**:
@@ -317,6 +342,15 @@ Configuration
        return $config;
    }));
    ```
+ * **orm.strategy**:
+   * **naming**: Naming strategy, instance `Doctrine\ORM\Mapping\NamingStrategy`.
+   * **quote**: Quote strategy, instance `Doctrine\ORM\Mapping\QuoteStrategy`.
+ * **orm.custom.functions**:
+   * **string**, **numeric**, **datetime**: Custom DQL functions, array of class names indexed by DQL function name.
+     Classes are subclasses of `Doctrine\ORM\Query\AST\Functions\FunctionNode`.
+   * **hydration_modes**: Hydrator class names, indexed by hydration mode name.
+     Classes are subclasses of `Doctrine\ORM\Internal\Hydration\AbstractHydrator`.
+  
 
 ### Services
 
@@ -343,6 +377,11 @@ $loader = require __DIR__ . '/../vendor/autoload.php';
 
 \Doctrine\Common\Annotations\AnnotationRegistry::registerLoader(array($loader, 'loadClass'));
 ```
+
+### Why is there no manager registry implementation?
+
+There is allready a thirdparty `ManagerRegistry` implementation at [saxulum-doctrine-orm-manager-registry-provider][9].
+It support the `entity` type known of the form component, adds the `UniqueEntity` validator and a command line integration.
 
 License
 -------
@@ -376,6 +415,9 @@ Some inspiration was also taken from [Doctrine Bundle][4] and
 [6]: http://github.com/dflydev/dflydev-psr0-resource-locator-service-provider
 [7]: https://packagist.org/packages/dflydev/doctrine-orm-service-provider
 [8]: https://github.com/Cilex/Cilex/blob/master/src/Cilex/Provider/DoctrineServiceProvider.php
+[9]: https://github.com/saxulum/saxulum-doctrine-orm-manager-registry-provider
+[10]: http://docs.doctrine-project.org/en/latest/reference/xml-mapping.html#simplified-xml-driver
+[11]: http://docs.doctrine-project.org/en/latest/reference/yaml-mapping.html#simplified-yaml-driver
 
 [#dflydev]: irc://irc.freenode.net/#dflydev
 [#silex-php]: irc://irc.freenode.net/#silex-php
